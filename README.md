@@ -1,6 +1,6 @@
 # VI-GS-SLAM: Visual-Inertial Gaussian-Splatting SLAM
 
-Fusing a from-scratch stereo VIO system (GTSAM factor graphs + IMU preintegration + ISAM2) with a 3D Gaussian-Splatting mapper (built on [MonoGS](https://github.com/muskie82/MonoGS), CVPR'24 Highlight) — replacing MonoGS's own photometric pose-tracker with externally-supplied VIO poses, to directly test how pose accuracy affects Gaussian-map reconstruction quality.
+Fusing a from-scratch stereo VIO system (GTSAM factor graphs + IMU preintegration + ISAM2) with a 3D Gaussian-Splatting mapper (built on [MonoGS](https://github.com/muskie82/MonoGS)) — replacing MonoGS's own photometric pose-tracker with externally-supplied VIO poses, to directly test how pose accuracy affects Gaussian-map reconstruction quality.
 
 This repo is the integration layer. It depends on two companion repos:
 - [`gtsam-custom-vio`]([https://github.com/SidArora29/gtsam-custom-vio](https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry)) — the VIO front-end that produces the trajectory files consumed here.
