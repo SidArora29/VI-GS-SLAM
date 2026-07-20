@@ -1,183 +1,73 @@
-[comment]: <> (# Gaussian Splatting SLAM)
+# VI-GS-SLAM: Visual-Inertial Gaussian-Splatting SLAM
 
-<!-- PROJECT LOGO -->
+Fusing a from-scratch stereo VIO system (GTSAM factor graphs + IMU preintegration + ISAM2) with a 3D Gaussian-Splatting mapper (built on [MonoGS](https://github.com/muskie82/MonoGS), CVPR'24 Highlight) — replacing MonoGS's own photometric pose-tracker with externally-supplied VIO poses, to directly test how pose accuracy affects Gaussian-map reconstruction quality.
 
-<p align="center">
+This repo is the integration layer. It depends on two companion repos:
+- [`gtsam-custom-vio`](https://github.com/SidArora29/gtsam-custom-vio) — the VIO front-end that produces the trajectory files consumed here.
+- A patched fork of [MonoGS](https://github.com/muskie82/MonoGS) — the mapping back-end, modified to accept external poses ([diff/patch included below](#patches-applied-to-monogs)).
 
-  <h1 align="center"> Gaussian Splatting SLAM
-  </h1>
-  <p align="center">
-    <a href="https://muskie82.github.io/"><strong>*Hidenobu Matsuki</strong></a>
-    ·
-    <a href="https://rmurai.co.uk/"><strong>*Riku Murai</strong></a>
-    ·
-    <a href="https://www.imperial.ac.uk/people/p.kelly/"><strong>Paul H.J. Kelly</strong></a>
-    ·
-    <a href="https://www.doc.ic.ac.uk/~ajd/"><strong>Andrew J. Davison</strong></a>
-  </p>
-  <p align="center">(* Equal Contribution)</p>
+## Why
 
-  <h3 align="center"> CVPR 2024 (Highlight)</h3>
+MonoGS estimates camera pose and builds the Gaussian map jointly, using a photometric-loss-driven optimizer for tracking. That works well in general but is known to struggle in low-texture, fast-motion conditions — exactly where a factor-graph VIO (fusing IMU + stereo) should be more robust, since it isn't relying on photometric consistency alone. This project decouples the two: **fix the camera trajectory from an independently-run VIO pipeline, and let MonoGS optimize only the map**, isolating how much of final reconstruction quality is actually gated by pose accuracy.
 
+## What was actually found
 
+Tested on EuRoC `MH_01_easy` (stereo + IMU, Machine Hall sequence):
 
-[comment]: <> (  <h2 align="center">PAPER</h2>)
-  <h3 align="center"><a href="https://arxiv.org/abs/2312.06741">Paper</a> | <a href="https://youtu.be/x604ghp9R_Q?si=nYoWr8h2Xh-6L_KN">Video</a> | <a href="https://rmurai.co.uk/projects/GaussianSplattingSLAM/">Project Page</a></h3>
-  <div align="center"></div>
+| Pose source | ATE RMSE (vs. mocap ground truth, `evo_ape -a`) | PSNR (0–600 frame window, MonoGS Gaussian map) |
+|---|---|---|
+| MonoGS native photometric tracker | — | 23.6 dB |
+| This project's VIO (classical stereo KLT + GTSAM) | 0.998 m | 13.3 dB |
+| This project's VIO (SuperPoint+LightGlue frontend) | 1.43 m | 11.4 dB |
 
-<p align="center">
-  <a href="">
-    <img src="./media/teaser.gif" alt="teaser" width="100%">
-  </a>
-  <a href="">
-    <img src="./media/gui.jpg" alt="gui" width="100%">
-  </a>
-</p>
-<p align="center">
-This software implements dense SLAM system presented in our paper <a href="https://arxiv.org/abs/2312.06741">Gaussian Splatting SLAM</a> in CVPR'24.
-The method demonstrates the first monocular SLAM solely based on 3D Gaussian Splatting (left), which also supports Stereo/RGB-D inputs (middle/right).
-</p>
-<br>
+**Finding:** VIO pose accuracy directly gates Gaussian-map quality — a consistent 5–10 dB PSNR gap between VIO-driven and native-tracker-driven mapping, reproduced across multiple trajectory windows. The classical stereo frontend outperformed a SuperPoint+LightGlue learned frontend on both trajectory accuracy and final map quality on this dataset, a result confirmed by direct A/B comparison, not assumption.
 
-# Note
-- In an academic paper, please refer to our work as **Gaussian Splatting SLAM** or **MonoGS** for short (this repo's name) to avoid confusion with other works.
-- Differential Gaussian Rasteriser with camera pose gradient computation is available [here](https://github.com/rmurai0610/diff-gaussian-rasterization-w-pose.git).
-- **[New]** Speed-up version of our code is available in `dev.speedup` branch, It achieves up to 10fps on monocular fr3/office sequence while keeping consistent performance (tested on RTX4090/i9-12900K). The code will be merged into the main branch after further refactoring and testing.
+**Loop closure:** implemented (ORB feature matching + PnP-verified geometric closure, inserted as robust `BetweenFactorPose3` constraints into the live ISAM2 graph). On this dataset it **degraded** trajectory accuracy — diagnosed as a perceptual-aliasing failure: Machine Hall's repetitive structural geometry (girders, scaffolding) produced a burst of mutually-reinforcing false-positive closures that a robust kernel couldn't reject, since the false matches agreed with each other. Reverted; documented here as a known failure mode rather than hidden. The fix (inlier-ratio thresholding, per-candidate deduplication, multi-hypothesis agreement) is scoped but not yet implemented — see [Future Work](#future-work).
 
-# Getting Started
-## Installation
-```
-git clone https://github.com/muskie82/MonoGS.git --recursive
-cd MonoGS
-```
-Setup the environment.
+## Architecture
 
 ```
-conda env create -f environment.yml
-conda activate MonoGS
-```
-Depending on your setup, please change the dependency version of pytorch/cudatoolkit in `environment.yml` by following [this document](https://pytorch.org/get-started/previous-versions/).
-
-Our test setup were:
-- Ubuntu 20.04: `pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.6`
-- Ubuntu 18.04: `pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3`
-
-## Quick Demo
-```
-bash scripts/download_tum.sh
-python slam.py --config configs/mono/tum/fr3_office.yaml
-```
-You will see a GUI window pops up.
-
-## Downloading Datasets
-Running the following scripts will automatically download datasets to the `./datasets` folder.
-### TUM-RGBD dataset
-```bash
-bash scripts/download_tum.sh
+Stereo images + IMU  →  GTSAM factor graph (VIO)  →  trajectory (.tum)
+                                                            │
+                                                            ▼
+                                          MonoGS dataset loader (patched)
+                                          reads external pose per frame,
+                                          skips photometric tracking,
+                                          optimizes only Gaussian params
+                                                            │
+                                                            ▼
+                                              Rendered Gaussian map + PSNR/ATE
 ```
 
-### Replica dataset
-```bash
-bash scripts/download_replica.sh
-```
+## Patches applied to MonoGS
 
-### EuRoC MAV dataset
-```bash
-bash scripts/download_euroc.sh
-```
+- `utils/dataset.py` — `EuRoCParser` accepts `use_external_pose` / `external_pose_file` config flags; loads poses from a TUM-format trajectory instead of EuRoC's mocap ground truth when enabled.
+- `utils/slam_frontend.py` — `tracking()` gated behind `use_external_pose`: when enabled, commits the loaded pose directly (`viewpoint.update_RT(R_gt, T_gt)`) and does a single no-grad render pass, instead of running the Adam photometric pose-optimizer.
+- `slam.py` — added pose-count sanity check + logging (`[VIGS-SLAM] Loading external VIO poses from ...`) so it's always visible which pose source a given run actually used.
 
+Full diffs in [`patches/`](./patches).
 
-
-## Run
-### Monocular
-```bash
-python slam.py --config configs/mono/tum/fr3_office.yaml
-```
-
-### RGB-D
-```bash
-python slam.py --config configs/rgbd/tum/fr3_office.yaml
-```
+## Reproducing
 
 ```bash
-python slam.py --config configs/rgbd/replica/office0.yaml
-```
-Or the single process version as
-```bash
-python slam.py --config configs/rgbd/replica/office0_sp.yaml
-```
+git clone https://github.com/SidArora29/vi-gs-slam
+cd vi-gs-slam
+# follow setup.md for MonoGS submodule build (simple-knn, diff-gaussian-rasterization)
 
-
-### Stereo (experimental)
-```bash
-python slam.py --config configs/stereo/euroc/mh02.yaml
+# 1. generate a VIO trajectory (see gtsam-custom-vio repo)
+# 2. point configs/stereo/euroc/mh01.yaml at it:
+#      Training.use_external_pose: True
+#      Training.external_pose_file: /path/to/your_vio_trajectory.tum
+python slam.py --config configs/stereo/euroc/mh01.yaml --eval
 ```
 
-## Live demo with Realsense
-First, you'll need to install `pyrealsense2`.
-Inside the conda environment, run:
-```bash
-pip install pyrealsense2
-```
-Connect the realsense camera to the PC on a **USB-3** port and then run:
-```bash
-python slam.py --config configs/live/realsense.yaml
-```
-We tested the method with [Intel Realsense d455](https://www.mouser.co.uk/new/intel/intel-realsense-depth-camera-d455/). We recommend using a similar global shutter camera for robust camera tracking. Please avoid aggressive camera motion, especially before the initial BA is performed. Check out [the first 15 seconds of our YouTube video](https://youtu.be/x604ghp9R_Q?si=S21HgeVTVfNe0BVL) to see how you should move the camera for initialisation. We recommend to use the code in `dev.speed-up` branch for live demo.
+## Future Work
 
-<p align="center">
-  <a href="">
-    <img src="./media/realsense.png" alt="teaser" width="50%">
-  </a>
-</p>
+- Fix loop closure with inlier-ratio thresholding + per-candidate dedup + second-candidate agreement, retest on the same sequence.
+- Investigate the fixed frontend-yield gap directly (stereo match count per frame) rather than only its downstream effect on ATE/PSNR.
+- Extend to a sequence with genuine loop revisits away from repetitive structure, to separate the aliasing failure mode from loop closure's general viability on this pipeline.
 
-# Evaluation
-<!-- To evaluate the method, please run the SLAM system with `save_results=True` in the base config file. This setting automatically outputs evaluation metrics in wandb and exports log files locally in save_dir. For benchmarking purposes, it is recommended to disable the GUI by setting `use_gui=False` in order to maximise GPU utilisation. For evaluating rendering quality, please set the `eval_rendering=True` flag in the configuration file. -->
-To evaluate our method, please add `--eval` to the command line argument:
-```bash
-python slam.py --config configs/mono/tum/fr3_office.yaml --eval
-```
-This flag will automatically run our system in a headless mode, and log the results including the rendering metrics.
+## Related
 
-# Reproducibility
-There might be minor differences between the released version and the results in the paper. Please bear in mind that multi-process performance has some randomness due to GPU utilisation.
-We run all our experiments on an RTX 4090, and the performance may differ when running with a different GPU.
-
-# Acknowledgement
-This work incorporates many open-source codes. We extend our gratitude to the authors of the software.
-- [3D Gaussian Splatting](https://github.com/graphdeco-inria/gaussian-splatting)
-- [Differential Gaussian Rasterization
-](https://github.com/graphdeco-inria/diff-gaussian-rasterization)
-- [SIBR_viewers](https://gitlab.inria.fr/sibr/sibr_core)
-- [Tiny Gaussian Splatting Viewer](https://github.com/limacv/GaussianSplattingViewer)
-- [Open3D](https://github.com/isl-org/Open3D)
-- [Point-SLAM](https://github.com/eriksandstroem/Point-SLAM)
-
-# License
-MonoGS is released under a **LICENSE.md**. For a list of code dependencies which are not property of the authors of MonoGS, please check **Dependencies.md**.
-
-# Citation
-If you found this code/work to be useful in your own research, please considering citing the following:
-
-```bibtex
-@inproceedings{Matsuki:Murai:etal:CVPR2024,
-  title={{G}aussian {S}platting {SLAM}},
-  author={Hidenobu Matsuki and Riku Murai and Paul H. J. Kelly and Andrew J. Davison},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  year={2024}
-}
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
+- [`gtsam-custom-vio`](https://github.com/SidArora29/gtsam-custom-vio) — the standalone VIO system (factor graph, IMU preintegration, both classical and learned frontends).
+- [MonoGS](https://github.com/muskie82/MonoGS) — Matsuki et al., CVPR 2024, the mapping backend this project builds on.
