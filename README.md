@@ -69,5 +69,5 @@ python slam.py --config configs/stereo/euroc/mh01.yaml --eval
 
 ## Related
 
-- [`gtsam-custom-vio`]([https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry](https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry) — the standalone VIO system (factor graph, IMU preintegration, both classical and learned frontends).
+- [`gtsam-custom-vio`]([https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry](https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry)) — the standalone VIO system (factor graph, IMU preintegration, both classical and learned frontends).
 - [MonoGS](https://github.com/muskie82/MonoGS) — Matsuki et al., CVPR 2024, the mapping backend this project builds on.
