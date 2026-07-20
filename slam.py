@@ -56,6 +56,25 @@ class SLAM:
             model_params, model_params.source_path, config=config
         )
 
+        # --- sanity check: confirm which pose source actually got used ---
+        use_external = self.config.get("Training", {}).get("use_external_pose", False)
+        ext_file = self.config.get("Training", {}).get("external_pose_file", None)
+        dataset_type = self.config["Dataset"]["type"]
+        n_poses = len(getattr(self.dataset, "poses", []))
+        n_imgs = len(getattr(self.dataset, "color_paths", []))
+        Log(
+            f"Dataset type={dataset_type} | use_external_pose={use_external} | "
+            f"external_pose_file={ext_file} | poses loaded={n_poses} | images={n_imgs}",
+            tag="VIGS-SLAM",
+        )
+        if use_external and n_poses != n_imgs:
+            Log(
+                f"WARNING: pose count ({n_poses}) does not match image count ({n_imgs}) "
+                f"— check your external_pose_file / timestamp association.",
+                tag="VIGS-SLAM",
+            )
+        # -------------------------------------------------------------
+
         self.gaussians.training_setup(opt_params)
         bg_color = [0, 0, 0]
         self.background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -121,14 +140,25 @@ class SLAM:
         if self.eval_rendering:
             self.gaussians = self.frontend.gaussians
             kf_indices = self.frontend.kf_indices
-            ATE = eval_ate(
-                self.frontend.cameras,
-                self.frontend.kf_indices,
-                self.save_dir,
-                0,
-                final=True,
-                monocular=self.monocular,
-            )
+            try:
+                ATE = eval_ate(
+                    self.frontend.cameras,
+                    self.frontend.kf_indices,
+                    self.save_dir,
+                    0,
+                    final=True,
+                    monocular=self.monocular,
+                )
+            except Exception as e:
+                Log(
+                    f"ATE could not be computed — trajectory alignment failed "
+                    f"(likely near-collinear/straight-line motion in this segment, "
+                    f"degenerate for SVD): {e}",
+                    tag="VIGS-SLAM",
+                )
+                ATE = float("nan")
+
+            torch.cuda.empty_cache()
 
             rendering_result = eval_rendering(
                 self.frontend.cameras,

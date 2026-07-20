@@ -26,23 +26,11 @@ class ReplicaParser:
 
     def load_poses(self, path):
         self.poses = []
-        with open(path, "r") as f:
+        with open(path) as f:
             lines = f.readlines()
-
-        frames = []
-        for i in range(self.n_img):
-            line = lines[i]
-            pose = np.array(list(map(float, line.split()))).reshape(4, 4)
-            pose = np.linalg.inv(pose)
-            self.poses.append(pose)
-            frame = {
-                "file_path": self.color_paths[i],
-                "depth_path": self.depth_paths[i],
-                "transform_matrix": pose.tolist(),
-            }
-
-            frames.append(frame)
-        self.frames = frames
+        for line in lines:
+            c2w = np.array(list(map(float, line.split()))).reshape(4, 4)
+            self.poses.append(c2w)
 
 
 class TUMParser:
@@ -62,16 +50,13 @@ class TUMParser:
                 j = np.argmin(np.abs(tstamp_depth - t))
                 if np.abs(tstamp_depth[j] - t) < max_dt:
                     associations.append((i, j))
-
             else:
                 j = np.argmin(np.abs(tstamp_depth - t))
                 k = np.argmin(np.abs(tstamp_pose - t))
-
                 if (np.abs(tstamp_depth[j] - t) < max_dt) and (
                     np.abs(tstamp_pose[k] - t) < max_dt
                 ):
                     associations.append((i, j, k))
-
         return associations
 
     def load_poses(self, datapath, frame_rate=-1):
@@ -118,23 +103,46 @@ class TUMParser:
                 "depth_path": str(os.path.join(datapath, depth_data[j, 1])),
                 "transform_matrix": (np.linalg.inv(T)).tolist(),
             }
-
             self.frames.append(frame)
 
 
 class EuRoCParser:
-    def __init__(self, input_folder, start_idx=0):
+    """
+    Loads EuRoC stereo images. By default, poses come from the dataset's own
+    motion-capture ground truth (state_groundtruth_estimate0/data.csv).
+
+    If config["Training"]["use_external_pose"] is True and a valid
+    config["Training"]["external_pose_file"] (TUM format: t tx ty tz qx qy qz qw)
+    is given, poses are loaded from that file instead — this is the hook for
+    feeding in your own VIO trajectory (learned_vio_MH01.tum).
+    """
+
+    def __init__(self, input_folder, config=None, start_idx=0, end_idx=None, stride=1):
         self.input_folder = input_folder
         self.start_idx = start_idx
+        self.config = config or {}
         self.color_paths = sorted(
             glob.glob(f"{self.input_folder}/mav0/cam0/data/*.png")
         )
         self.color_paths_r = sorted(
             glob.glob(f"{self.input_folder}/mav0/cam1/data/*.png")
         )
+        if len(self.color_paths) == 0:
+            raise FileNotFoundError(
+                f"[VIGS-SLAM] No images found under {self.input_folder}/mav0/cam0/data/*.png — "
+                f"check Dataset.dataset_path in your yaml points to the folder that directly "
+                f"contains 'mav0/' (e.g. .../MH_01_easy), not a parent or child directory."
+            )
         assert len(self.color_paths) == len(self.color_paths_r)
-        self.color_paths = self.color_paths[start_idx:]
-        self.color_paths_r = self.color_paths_r[start_idx:]
+
+        end_idx = end_idx if end_idx is not None else len(self.color_paths)
+        self.color_paths = self.color_paths[start_idx:end_idx:stride]
+        self.color_paths_r = self.color_paths_r[start_idx:end_idx:stride]
+        print(
+            f"[VIGS-SLAM] Using {len(self.color_paths)} of "
+            f"{len(sorted(glob.glob(f'{self.input_folder}/mav0/cam0/data/*.png')))} available frames "
+            f"(start_idx={start_idx}, end_idx={end_idx}, stride={stride})"
+        )
         self.n_img = len(self.color_paths)
         self.load_poses(
             f"{self.input_folder}/mav0/state_groundtruth_estimate0/data.csv"
@@ -146,24 +154,62 @@ class EuRoCParser:
             color_ts = float((self.color_paths[i].split("/")[-1]).split(".")[0])
             k = np.argmin(np.abs(ts_pose - color_ts))
             pose_indices.append(k)
-
         return pose_indices
+
+    # Fixed body(IMU) -> cam0 extrinsic, standard EuRoC calibration.
+    T_I_C0 = np.array(
+        [
+            [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975],
+            [0.999557249008, 0.0149672133247, 0.025715529948, -0.064676986768],
+            [-0.0257744366974, 0.00375618835797, 0.999660727178, 0.00981073058949],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
 
     def load_poses(self, path):
         self.poses = []
+
+        training_cfg = self.config.get("Training", {}) if isinstance(self.config, dict) else {}
+        use_external = training_cfg.get("use_external_pose", False)
+        ext_pose_file = training_cfg.get("external_pose_file", None)
+
+        if use_external and ext_pose_file and os.path.exists(ext_pose_file):
+            print(f"[VIGS-SLAM] Loading external VIO poses from {ext_pose_file}")
+            vio_data = np.loadtxt(ext_pose_file)
+            vio_ts = vio_data[:, 0]
+
+            img_ts = np.array(
+                [float(os.path.basename(p).split(".")[0]) / 1e9 for p in self.color_paths]
+            )
+
+            for t in img_ts:
+                k = np.argmin(np.abs(vio_ts - t))
+                row = vio_data[k]
+                trans = row[1:4]
+                quat_xyzw = row[4:8]
+
+                T_w_i = trimesh.transformations.quaternion_matrix(
+                    np.roll(quat_xyzw, 1)  # xyzw -> wxyz for trimesh
+                )
+                T_w_i[:3, 3] = trans
+
+                # If your VIO already outputs camera-frame pose directly
+                # (extrinsic already applied upstream), replace the next
+                # line with: T_w_c = T_w_i
+                T_w_c = np.dot(T_w_i, self.T_I_C0)
+
+                self.poses.append(np.linalg.inv(T_w_c))
+
+            print(f"[VIGS-SLAM] Loaded {len(self.poses)} external poses for {len(self.color_paths)} images")
+            return
+
+        # ---- original ground-truth path (unchanged) ----
+        print("[VIGS-SLAM] Using dataset ground-truth poses (use_external_pose is False)")
         with open(path) as f:
             reader = csv.reader(f)
             header = next(reader)
             data = [list(map(float, row)) for row in reader]
         data = np.array(data)
-        T_i_c0 = np.array(
-            [
-                [0.0148655429818, -0.999880929698, 0.00414029679422, -0.0216401454975],
-                [0.999557249008, 0.0149672133247, 0.025715529948, -0.064676986768],
-                [-0.0257744366974, 0.00375618835797, 0.999660727178, 0.00981073058949],
-                [0.0, 0.0, 0.0, 1.0],
-            ]
-        )
 
         pose_ts = data[:, 0]
         pose_indices = self.associate(pose_ts)
@@ -173,11 +219,10 @@ class EuRoCParser:
             trans = data[pose_indices[i], 1:4]
             quat = data[pose_indices[i], 4:8]
             quat = quat[[1, 2, 3, 0]]
-            
-            
+
             T_w_i = trimesh.transformations.quaternion_matrix(np.roll(quat, 1))
             T_w_i[:3, 3] = trans
-            T_w_c = np.dot(T_w_i, T_i_c0)
+            T_w_c = np.dot(T_w_i, self.T_I_C0)
 
             self.poses += [np.linalg.inv(T_w_c)]
 
@@ -185,7 +230,6 @@ class EuRoCParser:
                 "file_path": self.color_paths[i],
                 "transform_matrix": (np.linalg.inv(T_w_c)).tolist(),
             }
-
             frames.append(frame)
         self.frames = frames
 
@@ -210,7 +254,6 @@ class MonocularDataset(BaseDataset):
     def __init__(self, args, path, config):
         super().__init__(args, path, config)
         calibration = config["Dataset"]["Calibration"]
-        # Camera prameters
         self.fx = calibration["fx"]
         self.fy = calibration["fy"]
         self.cx = calibration["cx"]
@@ -222,7 +265,6 @@ class MonocularDataset(BaseDataset):
         self.K = np.array(
             [[self.fx, 0.0, self.cx], [0.0, self.fy, self.cy], [0.0, 0.0, 1.0]]
         )
-        # distortion parameters
         self.disorted = calibration["distorted"]
         self.dist_coeffs = np.array(
             [
@@ -241,11 +283,9 @@ class MonocularDataset(BaseDataset):
             (self.width, self.height),
             cv2.CV_32FC1,
         )
-        # depth parameters
         self.has_depth = True if "depth_scale" in calibration.keys() else False
         self.depth_scale = calibration["depth_scale"] if self.has_depth else None
 
-        # Default scene scale
         nerf_normalization_radius = 5
         self.scene_info = {
             "nerf_normalization": {
@@ -289,7 +329,7 @@ class StereoDataset(BaseDataset):
         cam0opt = calibration["cam0"]["opt"]
         cam1raw = calibration["cam1"]["raw"]
         cam1opt = calibration["cam1"]["opt"]
-        # Camera prameters
+
         self.fx_raw = cam0raw["fx"]
         self.fy_raw = cam0raw["fy"]
         self.cx_raw = cam0raw["cx"]
@@ -336,7 +376,6 @@ class StereoDataset(BaseDataset):
         )
         self.Rmat_r = np.array(calibration["cam1"]["R"]["data"]).reshape(3, 3)
 
-        # distortion parameters
         self.disorted = calibration["distorted"]
         self.dist_coeffs = np.array(
             [cam0raw["k1"], cam0raw["k2"], cam0raw["p1"], cam0raw["p2"], cam0raw["k3"]]
@@ -379,7 +418,7 @@ class StereoDataset(BaseDataset):
         disparity[disparity == 0] = 1e10
         depth = 47.90639384423901 / (
             disparity
-        )  ## Following ORB-SLAM2 config, baseline*fx
+        )  # following ORB-SLAM2 config, baseline*fx
         depth[depth < 0] = 0
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
         image = (
@@ -419,7 +458,13 @@ class EurocDataset(StereoDataset):
     def __init__(self, args, path, config):
         super().__init__(args, path, config)
         dataset_path = config["Dataset"]["dataset_path"]
-        parser = EuRoCParser(dataset_path, start_idx=config["Dataset"]["start_idx"])
+        parser = EuRoCParser(
+            dataset_path,
+            config=config,
+            start_idx=config["Dataset"]["start_idx"],
+            end_idx=config["Dataset"].get("end_idx", None),
+            stride=config["Dataset"].get("stride", 1),
+        )
         self.num_imgs = parser.n_img
         self.color_paths = parser.color_paths
         self.color_paths_r = parser.color_paths_r
@@ -431,11 +476,11 @@ class RealsenseDataset(BaseDataset):
         super().__init__(args, path, config)
         self.pipeline = rs.pipeline()
         self.h, self.w = 720, 1280
-        
+
         self.depth_scale = 0
         if self.config["Dataset"]["sensor_type"] == "depth":
-            self.has_depth = True 
-        else: 
+            self.has_depth = True
+        else:
             self.has_depth = False
 
         self.rs_config = rs.config()
@@ -451,14 +496,13 @@ class RealsenseDataset(BaseDataset):
 
         self.rgb_sensor = self.profile.get_device().query_sensors()[1]
         self.rgb_sensor.set_option(rs.option.enable_auto_exposure, False)
-        # rgb_sensor.set_option(rs.option.enable_auto_white_balance, True)
         self.rgb_sensor.set_option(rs.option.enable_auto_white_balance, False)
         self.rgb_sensor.set_option(rs.option.exposure, 200)
         self.rgb_profile = rs.video_stream_profile(
             self.profile.get_stream(rs.stream.color)
         )
         self.rgb_intrinsics = self.rgb_profile.get_intrinsics()
-        
+
         self.fx = self.rgb_intrinsics.fx
         self.fy = self.rgb_intrinsics.fy
         self.cx = self.rgb_intrinsics.ppx
@@ -479,14 +523,11 @@ class RealsenseDataset(BaseDataset):
 
         if self.has_depth:
             self.depth_sensor = self.profile.get_device().first_depth_sensor()
-            self.depth_scale  = self.depth_sensor.get_depth_scale()
+            self.depth_scale = self.depth_sensor.get_depth_scale()
             self.depth_profile = rs.video_stream_profile(
                 self.profile.get_stream(rs.stream.depth)
             )
             self.depth_intrinsics = self.depth_profile.get_intrinsics()
-        
-        
-
 
     def __getitem__(self, idx):
         pose = torch.eye(4, device=self.device, dtype=self.dtype)
@@ -498,7 +539,7 @@ class RealsenseDataset(BaseDataset):
             aligned_frames = self.align.process(frameset)
             rgb_frame = aligned_frames.get_color_frame()
             aligned_depth_frame = aligned_frames.get_depth_frame()
-            depth = np.array(aligned_depth_frame.get_data())*self.depth_scale
+            depth = np.array(aligned_depth_frame.get_data()) * self.depth_scale
             depth[depth < 0] = 0
             np.nan_to_num(depth, nan=1000)
         else:

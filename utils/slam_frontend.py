@@ -43,6 +43,9 @@ class FrontEnd(mp.Process):
         self.device = "cuda:0"
         self.pause = False
 
+        # --- VI-GS-SLAM: use externally supplied poses instead of photometric tracking ---
+        self.use_external_pose = config.get("Training", {}).get("use_external_pose", False)
+
     def set_hyperparams(self):
         self.save_dir = self.config["Results"]["save_dir"]
         self.save_results = self.config["Results"]["save_results"]
@@ -117,7 +120,7 @@ class FrontEnd(mp.Process):
         while not self.backend_queue.empty():
             self.backend_queue.get()
 
-        # Initialise the frame at the ground truth pose
+        # Initialise the frame at the ground truth / external pose
         viewpoint.update_RT(viewpoint.R_gt, viewpoint.T_gt)
 
         self.kf_indices = []
@@ -126,6 +129,32 @@ class FrontEnd(mp.Process):
         self.reset = False
 
     def tracking(self, cur_frame_idx, viewpoint):
+        # --- VI-GS-SLAM: bypass photometric pose optimization entirely ---
+        # viewpoint.R_gt / viewpoint.T_gt were populated from dataset.poses[idx]
+        # in Camera.init_from_dataset, which is exactly the VIO pose loaded by
+        # EuRoCParser.load_poses() when use_external_pose is True. We just
+        # commit that pose directly and do a single no-grad render pass so
+        # downstream keyframe/depth logic still has render_pkg to work with.
+        if self.use_external_pose:
+            viewpoint.update_RT(viewpoint.R_gt, viewpoint.T_gt)
+            with torch.no_grad():
+                render_pkg = render(
+                    viewpoint, self.gaussians, self.pipeline_params, self.background
+                )
+                depth, opacity = render_pkg["depth"], render_pkg["opacity"]
+                self.q_main2vis.put(
+                    gui_utils.GaussianPacket(
+                        current_frame=viewpoint,
+                        gtcolor=viewpoint.original_image,
+                        gtdepth=viewpoint.depth
+                        if not self.monocular
+                        else np.zeros((viewpoint.image_height, viewpoint.image_width)),
+                    )
+                )
+            self.median_depth = get_median_depth(depth, opacity)
+            return render_pkg
+        # --- end VI-GS-SLAM gate, original MonoGS photometric tracking below ---
+
         prev = self.cameras[cur_frame_idx - self.use_every_n_frames]
         viewpoint.update_RT(prev.R, prev.T)
 
@@ -346,14 +375,22 @@ class FrontEnd(mp.Process):
                 tic.record()
                 if cur_frame_idx >= len(self.dataset):
                     if self.save_results:
-                        eval_ate(
-                            self.cameras,
-                            self.kf_indices,
-                            self.save_dir,
-                            0,
-                            final=True,
-                            monocular=self.monocular,
-                        )
+                        try:
+                            eval_ate(
+                                self.cameras,
+                                self.kf_indices,
+                                self.save_dir,
+                                0,
+                                final=True,
+                                monocular=self.monocular,
+                            )
+                        except Exception as e:
+                            Log(
+                                f"Skipping final ATE eval — trajectory alignment failed "
+                                f"(likely near-collinear/straight-line motion in this "
+                                f"segment, degenerate for SVD): {e}",
+                                tag="VIGS-SLAM",
+                            )
                         save_gaussians(
                             self.gaussians, self.save_dir, "final", final=True
                         )
@@ -465,13 +502,20 @@ class FrontEnd(mp.Process):
                     and len(self.kf_indices) % self.save_trj_kf_intv == 0
                 ):
                     Log("Evaluating ATE at frame: ", cur_frame_idx)
-                    eval_ate(
-                        self.cameras,
-                        self.kf_indices,
-                        self.save_dir,
-                        cur_frame_idx,
-                        monocular=self.monocular,
-                    )
+                    try:
+                        eval_ate(
+                            self.cameras,
+                            self.kf_indices,
+                            self.save_dir,
+                            cur_frame_idx,
+                            monocular=self.monocular,
+                        )
+                    except Exception as e:
+                        Log(
+                            f"Skipping periodic ATE eval at frame {cur_frame_idx} "
+                            f"(degenerate/too few keyframes so far): {e}",
+                            tag="VIGS-SLAM",
+                        )
                 toc.record()
                 torch.cuda.synchronize()
                 if create_kf:
