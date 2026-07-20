@@ -3,7 +3,7 @@
 Fusing a from-scratch stereo VIO system (GTSAM factor graphs + IMU preintegration + ISAM2) with a 3D Gaussian-Splatting mapper (built on [MonoGS](https://github.com/muskie82/MonoGS), CVPR'24 Highlight) — replacing MonoGS's own photometric pose-tracker with externally-supplied VIO poses, to directly test how pose accuracy affects Gaussian-map reconstruction quality.
 
 This repo is the integration layer. It depends on two companion repos:
-- [`gtsam-custom-vio`](https://github.com/SidArora29/gtsam-custom-vio) — the VIO front-end that produces the trajectory files consumed here.
+- [`gtsam-custom-vio`]([https://github.com/SidArora29/gtsam-custom-vio](https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry)) — the VIO front-end that produces the trajectory files consumed here.
 - A patched fork of [MonoGS](https://github.com/muskie82/MonoGS) — the mapping back-end, modified to accept external poses ([diff/patch included below](#patches-applied-to-monogs)).
 
 ## Why
@@ -69,5 +69,5 @@ python slam.py --config configs/stereo/euroc/mh01.yaml --eval
 
 ## Related
 
-- [`gtsam-custom-vio`](https://github.com/SidArora29/gtsam-custom-vio) — the standalone VIO system (factor graph, IMU preintegration, both classical and learned frontends).
+- [`gtsam-custom-vio`]([https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry](https://github.com/SidArora29/Custom-Stereo-Visual-Inertial-Odometry) — the standalone VIO system (factor graph, IMU preintegration, both classical and learned frontends).
 - [MonoGS](https://github.com/muskie82/MonoGS) — Matsuki et al., CVPR 2024, the mapping backend this project builds on.
