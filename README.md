@@ -20,7 +20,7 @@ Tested on EuRoC `MH_01_easy` (stereo + IMU, Machine Hall sequence):
 | This project's VIO (classical stereo KLT + GTSAM) | 0.998 m | 13.3 dB |
 | This project's VIO (SuperPoint+LightGlue frontend) | 1.43 m | 11.4 dB |
 
-**Finding:** VIO pose accuracy directly gates Gaussian-map quality — a consistent 5–10 dB PSNR gap between VIO-driven and native-tracker-driven mapping, reproduced across multiple trajectory windows. The classical stereo frontend outperformed a SuperPoint+LightGlue learned frontend on both trajectory accuracy and final map quality on this dataset, a result confirmed by direct A/B comparison, not assumption.
+**Finding:** VIO pose accuracy directly gates Gaussian-map quality: a consistent 5–10 dB PSNR gap between VIO-driven and native-tracker-driven mapping, reproduced across multiple trajectory windows. The classical stereo frontend outperformed a SuperPoint+LightGlue learned frontend on both trajectory accuracy and final map quality on this dataset, a result confirmed by direct A/B comparison, not assumption.
 
 **Loop closure:** implemented (ORB feature matching + PnP-verified geometric closure, inserted as robust `BetweenFactorPose3` constraints into the live ISAM2 graph). On this dataset it **degraded** trajectory accuracy — diagnosed as a perceptual-aliasing failure: Machine Hall's repetitive structural geometry (girders, scaffolding) produced a burst of mutually-reinforcing false-positive closures that a robust kernel couldn't reject, since the false matches agreed with each other. Reverted; documented here as a known failure mode rather than hidden. The fix (inlier-ratio thresholding, per-candidate deduplication, multi-hypothesis agreement) is scoped but not yet implemented — see [Future Work](#future-work).
 
