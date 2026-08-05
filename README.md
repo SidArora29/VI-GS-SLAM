@@ -8,7 +8,7 @@ This repo is the integration layer. It depends on two companion repos:
 
 ## Why
 
-MonoGS estimates camera pose and builds the Gaussian map jointly, using a photometric-loss-driven optimizer for tracking. That works well in general but is known to struggle in low-texture, fast-motion conditions — exactly where a factor-graph VIO (fusing IMU + stereo) should be more robust, since it isn't relying on photometric consistency alone. This project decouples the two: **fix the camera trajectory from an independently-run VIO pipeline, and let MonoGS optimize only the map**, isolating how much of final reconstruction quality is actually gated by pose accuracy.
+MonoGS estimates camera pose and builds the Gaussian map jointly, using a photometric-loss-driven optimizer for tracking. That works well in general but is known to struggle in low-texture, fast-motion conditions: exactly where a factor-graph VIO (fusing IMU + stereo) should be more robust, since it isn't relying on photometric consistency alone. This project decouples the two: **fix the camera trajectory from an independently-run VIO pipeline, and let MonoGS optimize only the map**, isolating how much of final reconstruction quality is actually gated by pose accuracy.
 
 ## What was actually found
 
